@@ -4,6 +4,6 @@ services:
     runtime: python
     plan: free
     region: singapore
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 20 --timeout 0
+    buildCommand: pip install -r requirements_ws.txt
+    startCommand: gunicorn app_ws:app --bind 0.0.0.0:$PORT --workers 1 --threads 20 --timeout 0
     autoDeploy: true
