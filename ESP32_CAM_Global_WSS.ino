@@ -2,18 +2,25 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 
-const char* WIFI_SSID = "Shashi";
-const char* WIFI_PASSWORD = "0000000000";
+// =====================================================
+// WIFI / CLOUD
+// =====================================================
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 const char* SERVER_HOST = "esp32cam-global-ws.onrender.com";
 const uint16_t SERVER_PORT = 443;
 const char* SERVER_PATH = "/ws";
 
+// =====================================================
+// AI-THINKER ESP32-CAM
+// =====================================================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
 #define SIOD_GPIO_NUM     26
 #define SIOC_GPIO_NUM     27
+
 #define Y9_GPIO_NUM       35
 #define Y8_GPIO_NUM       34
 #define Y7_GPIO_NUM       39
@@ -22,6 +29,7 @@ const char* SERVER_PATH = "/ws";
 #define Y4_GPIO_NUM       19
 #define Y3_GPIO_NUM       18
 #define Y2_GPIO_NUM        5
+
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
@@ -39,14 +47,39 @@ unsigned long fpsTimer = 0;
 uint32_t frameCount = 0;
 uint32_t droppedFrames = 0;
 
-// 640x480.
-// For higher FPS later, change both occurrences of FRAMESIZE_VGA to QVGA.
 #define CAMERA_FRAME_SIZE FRAMESIZE_VGA
 #define JPEG_QUALITY 12
 
-// 70 ms is a target of about 14 FPS.
-// The actual rate is limited by capture + TLS + Internet + server.
+// Live stream target. Actual FPS depends on Wi-Fi/TLS/server.
 const unsigned long FRAME_INTERVAL = 70;
+
+void sendStillPhoto() {
+  if (!websocketConnected) return;
+
+  camera_fb_t* fb = esp_camera_fb_get();
+
+  if (!fb) {
+    Serial.println("Still capture failed");
+    return;
+  }
+
+  Serial.print("Sending still photo: ");
+  Serial.print(fb->len);
+  Serial.println(" bytes");
+
+  // Tell Render that the next binary WebSocket message is the
+  // last captured photo, not a live frame.
+  webSocket.sendTXT("PHOTO");
+  bool ok = webSocket.sendBIN(fb->buf, fb->len);
+
+  esp_camera_fb_return(fb);
+
+  if (ok) {
+    Serial.println("Still photo sent");
+  } else {
+    Serial.println("Still photo send failed");
+  }
+}
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
@@ -67,11 +100,15 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         digitalWrite(FLASH_LED_PIN, HIGH);
         flashState = true;
         Serial.println("FLASH ON");
-      } 
+      }
       else if (strcmp((char*)payload, "FLASH_OFF") == 0) {
         digitalWrite(FLASH_LED_PIN, LOW);
         flashState = false;
         Serial.println("FLASH OFF");
+      }
+      else if (strcmp((char*)payload, "CAPTURE_NOW") == 0) {
+        Serial.println("CAPTURE_NOW received");
+        sendStillPhoto();
       }
       break;
 
@@ -146,7 +183,7 @@ bool initCamera() {
     sensor->set_hmirror(sensor, 0);
   }
 
-  Serial.println("Camera initialized: 640x480 JPEG");
+  Serial.println("Camera initialized");
   return true;
 }
 
@@ -225,9 +262,9 @@ void setup() {
   delay(1000);
 
   Serial.println();
-  Serial.println("================================");
-  Serial.println(" ESP32-CAM GLOBAL WSS STREAM");
-  Serial.println("================================");
+  Serial.println("========================================");
+  Serial.println(" ESP32-CAM SMART HOME GLOBAL CAMERA");
+  Serial.println("========================================");
 
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
@@ -238,21 +275,14 @@ void setup() {
 
   connectWiFi();
 
-  webSocket.beginSSL(
-    SERVER_HOST,
-    SERVER_PORT,
-    SERVER_PATH
-  );
-
+  webSocket.beginSSL(SERVER_HOST, SERVER_PORT, SERVER_PATH);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
-
-  // Keep the connection alive.
   webSocket.enableHeartbeat(10000, 3000, 2);
 
   fpsTimer = millis();
 
-  Serial.print("Render WSS: wss://");
+  Serial.print("WSS: wss://");
   Serial.print(SERVER_HOST);
   Serial.println(SERVER_PATH);
 }
@@ -268,9 +298,7 @@ void loop() {
 
   unsigned long now = millis();
 
-  if (websocketConnected &&
-      now - lastFrameTime >= FRAME_INTERVAL) {
-
+  if (websocketConnected && now - lastFrameTime >= FRAME_INTERVAL) {
     lastFrameTime = now;
     sendFrame();
   }
