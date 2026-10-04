@@ -485,6 +485,10 @@ void startRenderWebSocket() {
   // The WebSockets library uses WiFiClientSecure
   // and, when no CA/fingerprint is supplied on ESP32,
   // it uses an insecure TLS mode.
+  // Remove the library's default "Origin: file://" header.
+  // Some WebSocket servers/proxies reject that Origin.
+  webSocket.setExtraHeaders();
+
   webSocket.beginSSL(
     SERVER_HOST,
     SERVER_PORT,
