@@ -1,22 +1,23 @@
+#define DEBUG_WEBSOCKETS_PORT Serial
+#include <Arduino.h>
 #include "esp_camera.h"
 #include <WiFi.h>
-#include <ArduinoWebsockets.h>
-
-using namespace websockets;
+#include <WebSocketsClient.h>
 
 // =====================================================
 // WIFI
 // =====================================================
 
-const char* ssid = "Shashi";
-const char* password = "0000000000";
+const char* WIFI_SSID = "Shashi";
+const char* WIFI_PASSWORD = "0000000000";
 
 // =====================================================
-// RENDER SERVER
+// RENDER WSS SERVER
 // =====================================================
 
-const char* WS_URL =
-  "wss://esp32cam-global-ws.onrender.com/ws";
+const char* SERVER_HOST = "esp32cam-global-ws.onrender.com";
+const uint16_t SERVER_PORT = 443;
+const char* SERVER_PATH = "/ws";
 
 // =====================================================
 // AI-THINKER ESP32-CAM PINS
@@ -41,154 +42,159 @@ const char* WS_URL =
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-#define FLASH_LED_PIN      4
+// =====================================================
+// FLASH
+// =====================================================
+
+#define FLASH_LED_PIN 4
 
 // =====================================================
 // CAMERA SETTINGS
 // =====================================================
 
-#define CAMERA_FRAME_SIZE  FRAMESIZE_VGA
-#define JPEG_QUALITY       12
+#define CAMERA_FRAME_SIZE FRAMESIZE_VGA
+#define JPEG_QUALITY 12
 
-// About 14 FPS target.
-// Actual FPS depends on Wi-Fi and Render connection.
+// Approx. 14 FPS target. Actual FPS depends on network.
 const unsigned long FRAME_INTERVAL = 70;
 
 // =====================================================
-// WEBSOCKET
+// WEBSOCKET CLIENT
 // =====================================================
 
-WebsocketsClient client;
+WebSocketsClient webSocket;
 
-bool websocketConnected = false;
+volatile bool websocketConnected = false;
 
 unsigned long lastFrameTime = 0;
-unsigned long lastReconnectTime = 0;
+unsigned long lastReconnectMessage = 0;
 unsigned long fpsTimer = 0;
 
 uint32_t frameCount = 0;
 uint32_t droppedFrames = 0;
 
 // =====================================================
-// WEBSOCKET MESSAGE CALLBACK
+// WEBSOCKET EVENT
 // =====================================================
 
-void onMessageCallback(WebsocketsMessage message) {
-
-  if (!message.isText()) {
-    return;
-  }
-
-  String command = message.data();
-
-  Serial.print("Command from Render: ");
-  Serial.println(command);
-
-  // ---------------------------------------------------
-  // FLASH ON
-  // ---------------------------------------------------
-
-  if (command == "FLASH_ON") {
-
-    digitalWrite(
-      FLASH_LED_PIN,
-      HIGH
-    );
-
-    Serial.println("FLASH ON");
-  }
-
-  // ---------------------------------------------------
-  // FLASH OFF
-  // ---------------------------------------------------
-
-  else if (command == "FLASH_OFF") {
-
-    digitalWrite(
-      FLASH_LED_PIN,
-      LOW
-    );
-
-    Serial.println("FLASH OFF");
-  }
-
-  // ---------------------------------------------------
-  // CAPTURE PHOTO
-  // ---------------------------------------------------
-
-  else if (command == "CAPTURE_NOW") {
-
-    Serial.println(
-      "CAPTURE_NOW received"
-    );
-
-    capturePhotoForCloud();
-  }
-}
-
-// =====================================================
-// WEBSOCKET EVENT CALLBACK
-// =====================================================
-
-void onEventsCallback(
-  WebsocketsEvent event,
-  String data
+void webSocketEvent(
+  WStype_t type,
+  uint8_t* payload,
+  size_t length
 ) {
 
-  if (
-    event == WebsocketsEvent::ConnectionOpened
-  ) {
+  switch (type) {
 
-    websocketConnected = true;
+    case WStype_DISCONNECTED:
+    {
+      websocketConnected = false;
 
-    Serial.println();
-    Serial.println(
-      "======================================"
-    );
+      Serial.println();
+      Serial.println(">>> WSS DISCONNECTED");
 
-    Serial.println(
-      " WEBSOCKET CONNECTED"
-    );
+      break;
+    }
 
-    Serial.println(
-      " RENDER CONNECTION SUCCESS"
-    );
+    case WStype_CONNECTED:
+    {
+      websocketConnected = true;
 
-    Serial.println(
-      "======================================"
-    );
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println(">>> WSS CONNECTED TO RENDER");
+      Serial.print(">>> Server: wss://");
+      Serial.print(SERVER_HOST);
+      Serial.println(SERVER_PATH);
+      Serial.println("========================================");
 
-  }
+      break;
+    }
 
-  else if (
-    event == WebsocketsEvent::ConnectionClosed
-  ) {
+    case WStype_TEXT:
+    {
+      if (payload == nullptr) {
+        break;
+      }
 
-    websocketConnected = false;
+      String command = String((char*)payload);
 
-    Serial.println(
-      "WEBSOCKET DISCONNECTED"
-    );
+      Serial.print(">>> Render command: ");
+      Serial.println(command);
 
-  }
+      // -----------------------------------------------
+      // FLASH ON
+      // -----------------------------------------------
 
-  else if (
-    event == WebsocketsEvent::GotPing
-  ) {
+      if (command == "FLASH_ON") {
 
-    Serial.println(
-      "WebSocket Ping received"
-    );
+        digitalWrite(
+          FLASH_LED_PIN,
+          HIGH
+        );
 
-  }
+        Serial.println(
+          ">>> FLASH ON"
+        );
+      }
 
-  else if (
-    event == WebsocketsEvent::GotPong
-  ) {
+      // -----------------------------------------------
+      // FLASH OFF
+      // -----------------------------------------------
 
-    Serial.println(
-      "WebSocket Pong received"
-    );
+      else if (command == "FLASH_OFF") {
+
+        digitalWrite(
+          FLASH_LED_PIN,
+          LOW
+        );
+
+        Serial.println(
+          ">>> FLASH OFF"
+        );
+      }
+
+      // -----------------------------------------------
+      // CAPTURE NOW
+      // -----------------------------------------------
+
+      else if (command == "CAPTURE_NOW") {
+
+        Serial.println(
+          ">>> CAPTURE_NOW received"
+        );
+
+        capturePhotoForCloud();
+      }
+
+      break;
+    }
+
+    case WStype_ERROR:
+    {
+      websocketConnected = false;
+
+      Serial.println();
+      Serial.println(">>> WSS ERROR");
+
+      if (payload != nullptr && length > 0) {
+
+        Serial.print(
+          ">>> Error payload: "
+        );
+
+        Serial.write(
+          payload,
+          length
+        );
+
+        Serial.println();
+      }
+
+      break;
+    }
+
+    default:
+      break;
   }
 }
 
@@ -224,12 +230,7 @@ bool initCamera() {
   config.pin_reset = RESET_GPIO_NUM;
 
   config.xclk_freq_hz = 20000000;
-
   config.pixel_format = PIXFORMAT_JPEG;
-
-  // ===================================================
-  // PSRAM
-  // ===================================================
 
   if (psramFound()) {
 
@@ -251,9 +252,7 @@ bool initCamera() {
     config.grab_mode =
       CAMERA_GRAB_LATEST;
 
-  }
-
-  else {
+  } else {
 
     Serial.println(
       "WARNING: PSRAM not detected"
@@ -262,8 +261,7 @@ bool initCamera() {
     config.frame_size =
       FRAMESIZE_QVGA;
 
-    config.jpeg_quality =
-      15;
+    config.jpeg_quality = 15;
 
     config.fb_count = 1;
 
@@ -273,10 +271,6 @@ bool initCamera() {
     config.grab_mode =
       CAMERA_GRAB_WHEN_EMPTY;
   }
-
-  // ===================================================
-  // START CAMERA
-  // ===================================================
 
   esp_err_t err =
     esp_camera_init(&config);
@@ -358,19 +352,28 @@ bool initCamera() {
 
 void connectWiFi() {
 
+  Serial.println();
+  Serial.println(
+    "Connecting to Wi-Fi..."
+  );
+
   WiFi.mode(
     WIFI_STA
   );
 
-  WiFi.setSleep(false);
-
-  WiFi.begin(
-    ssid,
-    password
+  WiFi.setSleep(
+    false
   );
 
-  Serial.print(
-    "Connecting to Wi-Fi"
+  WiFi.disconnect(
+    true
+  );
+
+  delay(300);
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASSWORD
   );
 
   int attempts = 0;
@@ -385,14 +388,11 @@ void connectWiFi() {
 
     attempts++;
 
-    if (
-      attempts >= 40
-    ) {
+    if (attempts >= 40) {
 
       Serial.println();
-
       Serial.println(
-        "Wi-Fi timeout"
+        "Wi-Fi timeout - restarting"
       );
 
       ESP.restart();
@@ -400,7 +400,6 @@ void connectWiFi() {
   }
 
   Serial.println();
-
   Serial.println(
     "Wi-Fi connected"
   );
@@ -424,72 +423,95 @@ void connectWiFi() {
   Serial.println(
     " dBm"
   );
+
+  Serial.print(
+    "DNS test host: "
+  );
+
+  Serial.println(
+    SERVER_HOST
+  );
+
+  IPAddress resolvedIP;
+
+  if (
+    WiFi.hostByName(
+      SERVER_HOST,
+      resolvedIP
+    )
+  ) {
+
+    Serial.print(
+      "Render DNS IP: "
+    );
+
+    Serial.println(
+      resolvedIP
+    );
+
+  } else {
+
+    Serial.println(
+      "Render DNS lookup failed"
+    );
+  }
 }
 
 // =====================================================
-// CONNECT TO RENDER
+// START RENDER WSS
 // =====================================================
 
-bool connectToRender() {
-
-  Serial.println();
-  Serial.println(
-    "======================================"
-  );
-
-  Serial.println(
-    "Connecting to Render..."
-  );
-
-  Serial.println(
-    WS_URL
-  );
-
-  Serial.println(
-    "======================================"
-  );
-
-  // Render provides HTTPS/WSS certificate.
-  // This disables local certificate validation.
-  client.setInsecure();
-
-  // Register callbacks
-  client.onMessage(
-    onMessageCallback
-  );
-
-  client.onEvent(
-    onEventsCallback
-  );
-
-  // Connect
-  bool connected =
-    client.connect(
-      WS_URL
-    );
-
-  if (connected) {
-
-    websocketConnected = true;
-
-    Serial.println(
-      "Render WebSocket connection OK"
-    );
-
-    return true;
-  }
+void startRenderWebSocket() {
 
   websocketConnected = false;
 
+  Serial.println();
   Serial.println(
-    "Render WebSocket connection FAILED"
+    "Starting Render WSS client..."
   );
 
-  return false;
+  Serial.print(
+    "WSS URL: wss://"
+  );
+
+  Serial.print(
+    SERVER_HOST
+  );
+
+  Serial.println(
+    SERVER_PATH
+  );
+
+  // The WebSockets library uses WiFiClientSecure
+  // and, when no CA/fingerprint is supplied on ESP32,
+  // it uses an insecure TLS mode.
+  webSocket.beginSSL(
+    SERVER_HOST,
+    SERVER_PORT,
+    SERVER_PATH
+  );
+
+  webSocket.onEvent(
+    webSocketEvent
+  );
+
+  webSocket.setReconnectInterval(
+    5000
+  );
+
+  webSocket.enableHeartbeat(
+    15000,
+    5000,
+    2
+  );
+
+  Serial.println(
+    "WSS client started"
+  );
 }
 
 // =====================================================
-// CAPTURE STILL PHOTO
+// CAPTURE STILL PHOTO AND SEND IT TO RENDER
 // =====================================================
 
 void capturePhotoForCloud() {
@@ -497,7 +519,7 @@ void capturePhotoForCloud() {
   if (!websocketConnected) {
 
     Serial.println(
-      "Cannot capture photo - WebSocket not connected"
+      "Cannot capture photo - WSS not connected"
     );
 
     return;
@@ -505,7 +527,7 @@ void capturePhotoForCloud() {
 
   Serial.println();
   Serial.println(
-    "Capturing photo..."
+    ">>> Capturing still photo..."
   );
 
   camera_fb_t* fb =
@@ -514,14 +536,14 @@ void capturePhotoForCloud() {
   if (fb == nullptr) {
 
     Serial.println(
-      "Camera capture failed"
+      ">>> Camera capture failed"
     );
 
     return;
   }
 
   Serial.print(
-    "Photo size: "
+    ">>> Photo size: "
   );
 
   Serial.print(
@@ -532,34 +554,31 @@ void capturePhotoForCloud() {
     " bytes"
   );
 
-  // Tell Render that the next binary
-  // message is the last photo.
+  // Tell Render that the NEXT binary message
+  // is a still photo for the "Last Captured Photo".
   bool tagOK =
-    client.send(
+    webSocket.sendTXT(
       "PHOTO"
     );
 
   if (!tagOK) {
 
     Serial.println(
-      "Failed to send PHOTO tag"
+      ">>> PHOTO tag send failed"
     );
 
     esp_camera_fb_return(
       fb
     );
 
-    websocketConnected = false;
-
     return;
   }
 
-  delay(5);
+  delay(10);
 
-  // Send JPEG
   bool photoOK =
-    client.sendBinary(
-      (const char*)fb->buf,
+    webSocket.sendBIN(
+      fb->buf,
       fb->len
     );
 
@@ -570,15 +589,13 @@ void capturePhotoForCloud() {
   if (photoOK) {
 
     Serial.println(
-      "Last photo sent to Render"
+      ">>> Last photo sent to Render"
     );
 
-  }
-
-  else {
+  } else {
 
     Serial.println(
-      "Photo send failed"
+      ">>> Last photo send FAILED"
     );
 
     websocketConnected = false;
@@ -586,7 +603,7 @@ void capturePhotoForCloud() {
 }
 
 // =====================================================
-// SEND LIVE FRAME
+// SEND LIVE CAMERA FRAME
 // =====================================================
 
 void sendLiveFrame() {
@@ -606,8 +623,8 @@ void sendLiveFrame() {
   }
 
   bool result =
-    client.sendBinary(
-      (const char*)fb->buf,
+    webSocket.sendBIN(
+      fb->buf,
       fb->len
     );
 
@@ -618,17 +635,21 @@ void sendLiveFrame() {
   if (result) {
 
     frameCount++;
-  }
 
-  else {
+  } else {
 
     droppedFrames++;
+
     websocketConnected = false;
+
+    Serial.println(
+      "Live frame send failed"
+    );
   }
 }
 
 // =====================================================
-// FPS DISPLAY
+// PRINT FPS
 // =====================================================
 
 void printFPS() {
@@ -687,6 +708,7 @@ void printFPS() {
     );
 
     frameCount = 0;
+
     droppedFrames = 0;
 
     fpsTimer = now;
@@ -737,7 +759,6 @@ void setup() {
     );
 
     while (true) {
-
       delay(1000);
     }
   }
@@ -745,14 +766,19 @@ void setup() {
   // Wi-Fi
   connectWiFi();
 
-  // WebSocket
-  connectToRender();
+  // Render WSS
+  startRenderWebSocket();
 
   fpsTimer =
     millis();
 
-  lastReconnectTime =
+  lastReconnectMessage =
     millis();
+
+  Serial.println();
+  Serial.println(
+    "System ready"
+  );
 }
 
 // =====================================================
@@ -761,57 +787,48 @@ void setup() {
 
 void loop() {
 
-  // ---------------------------------------------------
-  // Wi-Fi check
-  // ---------------------------------------------------
+  // Let the WebSocketsClient handle connection,
+  // reconnect and incoming messages.
+  webSocket.loop();
 
+  // Wi-Fi recovery
   if (
     WiFi.status() != WL_CONNECTED
   ) {
 
     websocketConnected = false;
 
+    Serial.println(
+      "Wi-Fi lost - reconnecting..."
+    );
+
     connectWiFi();
+
+    startRenderWebSocket();
+
+    delay(100);
 
     return;
   }
 
-  // ---------------------------------------------------
-  // WebSocket polling
-  // ---------------------------------------------------
-
-  if (client.available()) {
-
-    client.poll();
-  }
-
-  else {
-
-    websocketConnected = false;
-  }
-
-  // ---------------------------------------------------
-  // Reconnect when disconnected
-  // ---------------------------------------------------
-
   unsigned long now =
     millis();
 
+  // Periodic connection status
   if (
     !websocketConnected &&
-    now - lastReconnectTime >= 5000
+    now - lastReconnectMessage >= 5000
   ) {
 
-    lastReconnectTime =
+    lastReconnectMessage =
       now;
 
-    connectToRender();
+    Serial.println(
+      "Waiting for Render WSS connection..."
+    );
   }
 
-  // ---------------------------------------------------
-  // Live camera frame
-  // ---------------------------------------------------
-
+  // Live stream
   if (
     websocketConnected &&
     now - lastFrameTime >= FRAME_INTERVAL
@@ -823,9 +840,8 @@ void loop() {
     sendLiveFrame();
   }
 
-  // ---------------------------------------------------
   // FPS
-  // ---------------------------------------------------
-
   printFPS();
+
+  delay(1);
 }
