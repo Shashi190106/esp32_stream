@@ -1,0 +1,16 @@
+{
+  "name": "esp32-smart-home-cloud",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ESP32-CAM and ESP32 Smart Home cloud dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
