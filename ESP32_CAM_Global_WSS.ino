@@ -15,7 +15,7 @@ const char* WIFI_PASSWORD = "0000000000";
 // RENDER WSS SERVER
 // =====================================================
 
-const char* SERVER_HOST = "esp32cam-global-ws.onrender.com";
+const char* SERVER_HOST = "esp32cam-global-node.onrender.com";
 const uint16_t SERVER_PORT = 443;
 const char* SERVER_PATH = "/ws";
 
