@@ -58,8 +58,8 @@ main{max-width:1200px;margin:auto;padding:14px 18px 35px}.grid{display:grid;grid
 </main>
 
 <script>
-const API='https://esp32cam-global-ws.onrender.com';
-const WS=(location.protocol==='https:'?'wss://':'ws://')+'esp32cam-global-ws.onrender.com/viewer';
+const API='https://esp32cam-global-node.onrender.com';
+const WS=(location.protocol==='https:'?'wss://':'ws://')+'esp32cam-global-node.onrender.com/viewer';
 let ws=null,lastUrl=null,frames=0,lastTick=performance.now(),photoStamp=0;
 
 function connect(){
