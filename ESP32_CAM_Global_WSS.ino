@@ -1,20 +1,27 @@
 #include "esp_camera.h"
 #include <WiFi.h>
-#include <WebSocketsClient.h>
+#include <ArduinoWebsockets.h>
+
+using namespace websockets;
 
 // =====================================================
-// WIFI / CLOUD
+// WIFI
 // =====================================================
-const char* WIFI_SSID = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
-const char* SERVER_HOST = "esp32cam-global-ws.onrender.com";
-const uint16_t SERVER_PORT = 443;
-const char* SERVER_PATH = "/ws";
+const char* ssid = "Shashi";
+const char* password = "0000000000";
 
 // =====================================================
-// AI-THINKER ESP32-CAM
+// RENDER SERVER
 // =====================================================
+
+const char* WS_URL =
+  "wss://esp32cam-global-ws.onrender.com/ws";
+
+// =====================================================
+// AI-THINKER ESP32-CAM PINS
+// =====================================================
+
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -36,88 +43,161 @@ const char* SERVER_PATH = "/ws";
 
 #define FLASH_LED_PIN      4
 
-WebSocketsClient webSocket;
+// =====================================================
+// CAMERA SETTINGS
+// =====================================================
+
+#define CAMERA_FRAME_SIZE  FRAMESIZE_VGA
+#define JPEG_QUALITY       12
+
+// About 14 FPS target.
+// Actual FPS depends on Wi-Fi and Render connection.
+const unsigned long FRAME_INTERVAL = 70;
+
+// =====================================================
+// WEBSOCKET
+// =====================================================
+
+WebsocketsClient client;
 
 bool websocketConnected = false;
-bool flashState = false;
 
 unsigned long lastFrameTime = 0;
+unsigned long lastReconnectTime = 0;
 unsigned long fpsTimer = 0;
 
 uint32_t frameCount = 0;
 uint32_t droppedFrames = 0;
 
-#define CAMERA_FRAME_SIZE FRAMESIZE_VGA
-#define JPEG_QUALITY 12
+// =====================================================
+// WEBSOCKET MESSAGE CALLBACK
+// =====================================================
 
-// Live stream target. Actual FPS depends on Wi-Fi/TLS/server.
-const unsigned long FRAME_INTERVAL = 70;
+void onMessageCallback(WebsocketsMessage message) {
 
-void sendStillPhoto() {
-  if (!websocketConnected) return;
-
-  camera_fb_t* fb = esp_camera_fb_get();
-
-  if (!fb) {
-    Serial.println("Still capture failed");
+  if (!message.isText()) {
     return;
   }
 
-  Serial.print("Sending still photo: ");
-  Serial.print(fb->len);
-  Serial.println(" bytes");
+  String command = message.data();
 
-  // Tell Render that the next binary WebSocket message is the
-  // last captured photo, not a live frame.
-  webSocket.sendTXT("PHOTO");
-  bool ok = webSocket.sendBIN(fb->buf, fb->len);
+  Serial.print("Command from Render: ");
+  Serial.println(command);
 
-  esp_camera_fb_return(fb);
+  // ---------------------------------------------------
+  // FLASH ON
+  // ---------------------------------------------------
 
-  if (ok) {
-    Serial.println("Still photo sent");
-  } else {
-    Serial.println("Still photo send failed");
+  if (command == "FLASH_ON") {
+
+    digitalWrite(
+      FLASH_LED_PIN,
+      HIGH
+    );
+
+    Serial.println("FLASH ON");
+  }
+
+  // ---------------------------------------------------
+  // FLASH OFF
+  // ---------------------------------------------------
+
+  else if (command == "FLASH_OFF") {
+
+    digitalWrite(
+      FLASH_LED_PIN,
+      LOW
+    );
+
+    Serial.println("FLASH OFF");
+  }
+
+  // ---------------------------------------------------
+  // CAPTURE PHOTO
+  // ---------------------------------------------------
+
+  else if (command == "CAPTURE_NOW") {
+
+    Serial.println(
+      "CAPTURE_NOW received"
+    );
+
+    capturePhotoForCloud();
   }
 }
 
-void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
-  switch (type) {
-    case WStype_CONNECTED:
-      websocketConnected = true;
-      Serial.println("WebSocket CONNECTED");
-      break;
+// =====================================================
+// WEBSOCKET EVENT CALLBACK
+// =====================================================
 
-    case WStype_DISCONNECTED:
-      websocketConnected = false;
-      Serial.println("WebSocket DISCONNECTED");
-      break;
+void onEventsCallback(
+  WebsocketsEvent event,
+  String data
+) {
 
-    case WStype_TEXT:
-      if (!payload) return;
+  if (
+    event == WebsocketsEvent::ConnectionOpened
+  ) {
 
-      if (strcmp((char*)payload, "FLASH_ON") == 0) {
-        digitalWrite(FLASH_LED_PIN, HIGH);
-        flashState = true;
-        Serial.println("FLASH ON");
-      }
-      else if (strcmp((char*)payload, "FLASH_OFF") == 0) {
-        digitalWrite(FLASH_LED_PIN, LOW);
-        flashState = false;
-        Serial.println("FLASH OFF");
-      }
-      else if (strcmp((char*)payload, "CAPTURE_NOW") == 0) {
-        Serial.println("CAPTURE_NOW received");
-        sendStillPhoto();
-      }
-      break;
+    websocketConnected = true;
 
-    default:
-      break;
+    Serial.println();
+    Serial.println(
+      "======================================"
+    );
+
+    Serial.println(
+      " WEBSOCKET CONNECTED"
+    );
+
+    Serial.println(
+      " RENDER CONNECTION SUCCESS"
+    );
+
+    Serial.println(
+      "======================================"
+    );
+
+  }
+
+  else if (
+    event == WebsocketsEvent::ConnectionClosed
+  ) {
+
+    websocketConnected = false;
+
+    Serial.println(
+      "WEBSOCKET DISCONNECTED"
+    );
+
+  }
+
+  else if (
+    event == WebsocketsEvent::GotPing
+  ) {
+
+    Serial.println(
+      "WebSocket Ping received"
+    );
+
+  }
+
+  else if (
+    event == WebsocketsEvent::GotPong
+  ) {
+
+    Serial.println(
+      "WebSocket Pong received"
+    );
   }
 }
+
+// =====================================================
+// CAMERA INITIALIZATION
+// =====================================================
 
 bool initCamera() {
+
   camera_config_t config;
 
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -144,164 +224,608 @@ bool initCamera() {
   config.pin_reset = RESET_GPIO_NUM;
 
   config.xclk_freq_hz = 20000000;
+
   config.pixel_format = PIXFORMAT_JPEG;
 
-  if (!psramFound()) {
-    Serial.println("PSRAM NOT FOUND - using QVGA");
-    config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 15;
-    config.fb_count = 1;
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  } else {
-    Serial.println("PSRAM OK");
-    config.frame_size = CAMERA_FRAME_SIZE;
-    config.jpeg_quality = JPEG_QUALITY;
+  // ===================================================
+  // PSRAM
+  // ===================================================
+
+  if (psramFound()) {
+
+    Serial.println(
+      "PSRAM detected"
+    );
+
+    config.frame_size =
+      CAMERA_FRAME_SIZE;
+
+    config.jpeg_quality =
+      JPEG_QUALITY;
+
     config.fb_count = 2;
-    config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.grab_mode = CAMERA_GRAB_LATEST;
+
+    config.fb_location =
+      CAMERA_FB_IN_PSRAM;
+
+    config.grab_mode =
+      CAMERA_GRAB_LATEST;
+
   }
 
-  esp_err_t err = esp_camera_init(&config);
+  else {
+
+    Serial.println(
+      "WARNING: PSRAM not detected"
+    );
+
+    config.frame_size =
+      FRAMESIZE_QVGA;
+
+    config.jpeg_quality =
+      15;
+
+    config.fb_count = 1;
+
+    config.fb_location =
+      CAMERA_FB_IN_DRAM;
+
+    config.grab_mode =
+      CAMERA_GRAB_WHEN_EMPTY;
+  }
+
+  // ===================================================
+  // START CAMERA
+  // ===================================================
+
+  esp_err_t err =
+    esp_camera_init(&config);
 
   if (err != ESP_OK) {
-    Serial.print("Camera init failed: 0x");
-    Serial.println(err, HEX);
+
+    Serial.print(
+      "Camera init failed: 0x"
+    );
+
+    Serial.println(
+      err,
+      HEX
+    );
+
     return false;
   }
 
-  sensor_t* sensor = esp_camera_sensor_get();
+  sensor_t* sensor =
+    esp_camera_sensor_get();
 
-  if (sensor) {
-    sensor->set_framesize(sensor, CAMERA_FRAME_SIZE);
-    sensor->set_quality(sensor, JPEG_QUALITY);
-    sensor->set_brightness(sensor, 0);
-    sensor->set_contrast(sensor, 0);
-    sensor->set_saturation(sensor, 0);
-    sensor->set_sharpness(sensor, 1);
-    sensor->set_vflip(sensor, 0);
-    sensor->set_hmirror(sensor, 0);
+  if (sensor != nullptr) {
+
+    sensor->set_framesize(
+      sensor,
+      CAMERA_FRAME_SIZE
+    );
+
+    sensor->set_quality(
+      sensor,
+      JPEG_QUALITY
+    );
+
+    sensor->set_brightness(
+      sensor,
+      0
+    );
+
+    sensor->set_contrast(
+      sensor,
+      0
+    );
+
+    sensor->set_saturation(
+      sensor,
+      0
+    );
+
+    sensor->set_sharpness(
+      sensor,
+      1
+    );
+
+    sensor->set_vflip(
+      sensor,
+      0
+    );
+
+    sensor->set_hmirror(
+      sensor,
+      0
+    );
   }
 
-  Serial.println("Camera initialized");
+  Serial.println(
+    "Camera initialized successfully"
+  );
+
+  Serial.println(
+    "Resolution: 640x480"
+  );
+
   return true;
 }
 
-void connectWiFi() {
-  Serial.println("Connecting WiFi...");
+// =====================================================
+// WIFI CONNECTION
+// =====================================================
 
-  WiFi.mode(WIFI_STA);
+void connectWiFi() {
+
+  WiFi.mode(
+    WIFI_STA
+  );
+
   WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  WiFi.begin(
+    ssid,
+    password
+  );
+
+  Serial.print(
+    "Connecting to Wi-Fi"
+  );
 
   int attempts = 0;
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
+  while (
+    WiFi.status() != WL_CONNECTED
+  ) {
+
+    delay(500);
+
     Serial.print(".");
 
-    if (++attempts > 60) {
-      Serial.println("\nWiFi timeout - restarting");
+    attempts++;
+
+    if (
+      attempts >= 40
+    ) {
+
+      Serial.println();
+
+      Serial.println(
+        "Wi-Fi timeout"
+      );
+
       ESP.restart();
     }
   }
 
   Serial.println();
-  Serial.println("WiFi connected");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("RSSI: ");
-  Serial.print(WiFi.RSSI());
-  Serial.println(" dBm");
+
+  Serial.println(
+    "Wi-Fi connected"
+  );
+
+  Serial.print(
+    "ESP32-CAM IP: "
+  );
+
+  Serial.println(
+    WiFi.localIP()
+  );
+
+  Serial.print(
+    "RSSI: "
+  );
+
+  Serial.print(
+    WiFi.RSSI()
+  );
+
+  Serial.println(
+    " dBm"
+  );
 }
 
-void sendFrame() {
-  if (!websocketConnected) return;
+// =====================================================
+// CONNECT TO RENDER
+// =====================================================
 
-  camera_fb_t* fb = esp_camera_fb_get();
+bool connectToRender() {
 
-  if (!fb) {
-    droppedFrames++;
-    Serial.println("Camera capture failed");
+  Serial.println();
+  Serial.println(
+    "======================================"
+  );
+
+  Serial.println(
+    "Connecting to Render..."
+  );
+
+  Serial.println(
+    WS_URL
+  );
+
+  Serial.println(
+    "======================================"
+  );
+
+  // Render provides HTTPS/WSS certificate.
+  // This disables local certificate validation.
+  client.setInsecure();
+
+  // Register callbacks
+  client.onMessage(
+    onMessageCallback
+  );
+
+  client.onEvent(
+    onEventsCallback
+  );
+
+  // Connect
+  bool connected =
+    client.connect(
+      WS_URL
+    );
+
+  if (connected) {
+
+    websocketConnected = true;
+
+    Serial.println(
+      "Render WebSocket connection OK"
+    );
+
+    return true;
+  }
+
+  websocketConnected = false;
+
+  Serial.println(
+    "Render WebSocket connection FAILED"
+  );
+
+  return false;
+}
+
+// =====================================================
+// CAPTURE STILL PHOTO
+// =====================================================
+
+void capturePhotoForCloud() {
+
+  if (!websocketConnected) {
+
+    Serial.println(
+      "Cannot capture photo - WebSocket not connected"
+    );
+
     return;
   }
 
-  bool ok = webSocket.sendBIN(fb->buf, fb->len);
+  Serial.println();
+  Serial.println(
+    "Capturing photo..."
+  );
 
-  esp_camera_fb_return(fb);
+  camera_fb_t* fb =
+    esp_camera_fb_get();
 
-  if (ok) frameCount++;
-  else droppedFrames++;
+  if (fb == nullptr) {
+
+    Serial.println(
+      "Camera capture failed"
+    );
+
+    return;
+  }
+
+  Serial.print(
+    "Photo size: "
+  );
+
+  Serial.print(
+    fb->len
+  );
+
+  Serial.println(
+    " bytes"
+  );
+
+  // Tell Render that the next binary
+  // message is the last photo.
+  bool tagOK =
+    client.send(
+      "PHOTO"
+    );
+
+  if (!tagOK) {
+
+    Serial.println(
+      "Failed to send PHOTO tag"
+    );
+
+    esp_camera_fb_return(
+      fb
+    );
+
+    websocketConnected = false;
+
+    return;
+  }
+
+  delay(5);
+
+  // Send JPEG
+  bool photoOK =
+    client.sendBinary(
+      (const char*)fb->buf,
+      fb->len
+    );
+
+  esp_camera_fb_return(
+    fb
+  );
+
+  if (photoOK) {
+
+    Serial.println(
+      "Last photo sent to Render"
+    );
+
+  }
+
+  else {
+
+    Serial.println(
+      "Photo send failed"
+    );
+
+    websocketConnected = false;
+  }
 }
 
+// =====================================================
+// SEND LIVE FRAME
+// =====================================================
+
+void sendLiveFrame() {
+
+  if (!websocketConnected) {
+    return;
+  }
+
+  camera_fb_t* fb =
+    esp_camera_fb_get();
+
+  if (fb == nullptr) {
+
+    droppedFrames++;
+
+    return;
+  }
+
+  bool result =
+    client.sendBinary(
+      (const char*)fb->buf,
+      fb->len
+    );
+
+  esp_camera_fb_return(
+    fb
+  );
+
+  if (result) {
+
+    frameCount++;
+  }
+
+  else {
+
+    droppedFrames++;
+    websocketConnected = false;
+  }
+}
+
+// =====================================================
+// FPS DISPLAY
+// =====================================================
+
 void printFPS() {
-  unsigned long now = millis();
 
-  if (now - fpsTimer >= 2000) {
-    float fps = frameCount * 1000.0f / (now - fpsTimer);
+  unsigned long now =
+    millis();
 
-    Serial.print("FPS: ");
-    Serial.print(fps, 1);
-    Serial.print(" | Sent: ");
-    Serial.print(frameCount);
-    Serial.print(" | Dropped: ");
-    Serial.print(droppedFrames);
-    Serial.print(" | Heap: ");
-    Serial.print(ESP.getFreeHeap());
-    Serial.print(" | PSRAM: ");
-    Serial.println(ESP.getFreePsram());
+  if (
+    now - fpsTimer >= 2000
+  ) {
+
+    float fps =
+      frameCount *
+      1000.0f /
+      (now - fpsTimer);
+
+    Serial.print(
+      "FPS: "
+    );
+
+    Serial.print(
+      fps,
+      1
+    );
+
+    Serial.print(
+      " | Sent: "
+    );
+
+    Serial.print(
+      frameCount
+    );
+
+    Serial.print(
+      " | Dropped: "
+    );
+
+    Serial.print(
+      droppedFrames
+    );
+
+    Serial.print(
+      " | Free Heap: "
+    );
+
+    Serial.print(
+      ESP.getFreeHeap()
+    );
+
+    Serial.print(
+      " | Free PSRAM: "
+    );
+
+    Serial.println(
+      ESP.getFreePsram()
+    );
 
     frameCount = 0;
     droppedFrames = 0;
+
     fpsTimer = now;
   }
 }
 
+// =====================================================
+// SETUP
+// =====================================================
+
 void setup() {
-  Serial.begin(115200);
+
+  Serial.begin(
+    115200
+  );
+
   delay(1000);
 
   Serial.println();
-  Serial.println("========================================");
-  Serial.println(" ESP32-CAM SMART HOME GLOBAL CAMERA");
-  Serial.println("========================================");
+  Serial.println(
+    "=========================================="
+  );
 
-  pinMode(FLASH_LED_PIN, OUTPUT);
-  digitalWrite(FLASH_LED_PIN, LOW);
+  Serial.println(
+    " ESP32-CAM SMART HOME GLOBAL CAMERA"
+  );
 
+  Serial.println(
+    "=========================================="
+  );
+
+  // Flash
+  pinMode(
+    FLASH_LED_PIN,
+    OUTPUT
+  );
+
+  digitalWrite(
+    FLASH_LED_PIN,
+    LOW
+  );
+
+  // Camera
   if (!initCamera()) {
-    while (true) delay(1000);
+
+    Serial.println(
+      "Camera initialization failed"
+    );
+
+    while (true) {
+
+      delay(1000);
+    }
   }
 
+  // Wi-Fi
   connectWiFi();
 
-  webSocket.beginSSL(SERVER_HOST, SERVER_PORT, SERVER_PATH);
-  webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);
-  webSocket.enableHeartbeat(10000, 3000, 2);
+  // WebSocket
+  connectToRender();
 
-  fpsTimer = millis();
+  fpsTimer =
+    millis();
 
-  Serial.print("WSS: wss://");
-  Serial.print(SERVER_HOST);
-  Serial.println(SERVER_PATH);
+  lastReconnectTime =
+    millis();
 }
 
-void loop() {
-  webSocket.loop();
+// =====================================================
+// LOOP
+// =====================================================
 
-  if (WiFi.status() != WL_CONNECTED) {
+void loop() {
+
+  // ---------------------------------------------------
+  // Wi-Fi check
+  // ---------------------------------------------------
+
+  if (
+    WiFi.status() != WL_CONNECTED
+  ) {
+
     websocketConnected = false;
+
     connectWiFi();
+
     return;
   }
 
-  unsigned long now = millis();
+  // ---------------------------------------------------
+  // WebSocket polling
+  // ---------------------------------------------------
 
-  if (websocketConnected && now - lastFrameTime >= FRAME_INTERVAL) {
-    lastFrameTime = now;
-    sendFrame();
+  if (client.available()) {
+
+    client.poll();
   }
+
+  else {
+
+    websocketConnected = false;
+  }
+
+  // ---------------------------------------------------
+  // Reconnect when disconnected
+  // ---------------------------------------------------
+
+  unsigned long now =
+    millis();
+
+  if (
+    !websocketConnected &&
+    now - lastReconnectTime >= 5000
+  ) {
+
+    lastReconnectTime =
+      now;
+
+    connectToRender();
+  }
+
+  // ---------------------------------------------------
+  // Live camera frame
+  // ---------------------------------------------------
+
+  if (
+    websocketConnected &&
+    now - lastFrameTime >= FRAME_INTERVAL
+  ) {
+
+    lastFrameTime =
+      now;
+
+    sendLiveFrame();
+  }
+
+  // ---------------------------------------------------
+  // FPS
+  // ---------------------------------------------------
 
   printFPS();
 }
